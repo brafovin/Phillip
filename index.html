@@ -57,6 +57,8 @@
   #controlsHint { position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%); font-size: 13px;
     color: #bba; background: rgba(0,0,0,0.4); padding: 8px 16px; border-radius: 6px; transition: opacity 1s; }
   #flash { position: fixed; inset: 0; z-index: 9; background: rgba(200,30,30,0); pointer-events: none; transition: background .1s; }
+  #vignette { position: fixed; inset: 0; z-index: 8; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 38%, rgba(0,0,0,0.72) 100%); }
   #pauseScreen .panel, #endScreen .panel { background: rgba(0,0,0,0.5); padding: 30px 50px; border: 1px solid #5a4a3a; border-radius: 10px; }
   .dmgNum { position: fixed; z-index: 11; font-weight: bold; font-size: 18px; pointer-events: none;
     text-shadow: 0 0 4px #000; transition: transform .8s linear, opacity .8s linear; }
@@ -78,6 +80,7 @@
   <div id="controlsHint">WASD bewegen · Maus umschauen · Shift rennen · Leertaste/Klick Angriff · Q Ki-Angriff · E Interagieren · 1-6 Waffe wechseln · ESC Pause · Sammle leuchtende Power-Ups!</div>
 </div>
 <div id="flash"></div>
+<div id="vignette"></div>
 
 <div id="intro" class="overlay">
   <h1 class="title">浪人伝説</h1>
@@ -440,9 +443,11 @@ function initRenderer() {
   clock = new THREE.Clock();
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
   document.getElementById("game").appendChild(renderer.domElement);
 
   scene = new THREE.Scene();
@@ -458,12 +463,18 @@ function initLights() {
   const moon = new THREE.DirectionalLight(0x9fb4ff, 0.7);
   moon.position.set(-60, 90, -40);
   moon.castShadow = true;
-  moon.shadow.mapSize.set(2048, 2048);
+  moon.shadow.mapSize.set(4096, 4096);
   const d = 120;
   moon.shadow.camera.left = -d; moon.shadow.camera.right = d;
   moon.shadow.camera.top = d; moon.shadow.camera.bottom = -d;
   moon.shadow.camera.near = 1; moon.shadow.camera.far = 300;
   scene.add(moon); scene.add(moon.target);
+  // warm rim light from the opposite side for depth
+  const rim = new THREE.DirectionalLight(0xff8844, 0.32);
+  rim.position.set(80, 30, 80); scene.add(rim);
+  // cool fill from below for dramatic look
+  const fill = new THREE.HemisphereLight(0x2a3a7a, 0x0a0812, 0.35);
+  scene.add(fill);
 }
 
 function buildSky() {
@@ -733,6 +744,37 @@ function spawnPickupBurst(pos, color) {
   }
 }
 
+function spawnBloodBurst(pos) {
+  for (let i=0;i<7;i++){
+    const p = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06+Math.random()*0.08, 5, 5),
+      new THREE.MeshBasicMaterial({ color: 0xbb0a0a, transparent: true, opacity: 0.92 }));
+    const a = Math.random()*Math.PI*2, spd = 1.2+Math.random()*2.5;
+    p.position.copy(pos).add(new THREE.Vector3((Math.random()-0.5)*0.5, 0.9+Math.random()*1.0, (Math.random()-0.5)*0.5));
+    p.userData = { vy: 1.8+Math.random()*1.5, vx: Math.cos(a)*spd*0.5, vz: Math.sin(a)*spd*0.5,
+      grav: -6 - Math.random()*3, life: 0.35+Math.random()*0.25, spin: Math.random()*4-2 };
+    scene.add(p); petals.push(p);
+  }
+}
+
+function spawnSwingTrail(weapon) {
+  const w = WEAPONS[weapon] || WEAPONS.katana;
+  const segments = 7;
+  for (let i=0;i<segments;i++){
+    const t = i/(segments-1) - 0.5; // -0.5 to 0.5
+    const angle = playerObj.rotation.y + t * Math.PI * (0.5 + w.arc * 1.2);
+    const dist = w.reach * 0.55;
+    const trail = new THREE.Mesh(new THREE.PlaneGeometry(0.1, w.reach * 0.75),
+      new THREE.MeshBasicMaterial({ color: 0xd8f0ff, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false }));
+    trail.position.copy(playerObj.position).add(
+      new THREE.Vector3(Math.sin(angle)*dist, 1.65, Math.cos(angle)*dist));
+    trail.rotation.y = angle + Math.PI/2;
+    trail.rotation.x = -0.35;
+    trail.userData = { life: 0.22, spin: 0, drift: 0 };
+    scene.add(trail); petals.push(trail);
+  }
+}
+
 function createPlayer() {
   playerObj = buildHumanoid({
     armorColor: CFG.armorColor, skinColor: 0xd9a87a, clanColor: CFG.clanColor,
@@ -745,7 +787,7 @@ function createPlayer() {
     hp: 100, maxHp: 100, ki: 50, maxKi: 50, xp: 0, level: 1, nextXp: 100,
     strength: 12, defense: 6, speed: 8, kiPower: 14, kills: 0,
     attacking: false, swingT: 0, hitDone: false,
-    kiCooldown: 0, hurtCooldown: 0, interactCooldown: 0,
+    kiCooldown: 0, hurtCooldown: 0, hurtAnimT: 0, interactCooldown: 0,
     walkPhase: 0,
     weapon: CFG.weapon,
     weapons: { katana: true, [CFG.weapon]: true },  // anfangs Katana + gewählte Waffe
@@ -757,7 +799,8 @@ function doAttack() {
   const ps = playerState;
   if (ps.attacking) return;
   ps.attacking = true; ps.swingT = 0; ps.hitDone = false;
-  makeNoise(0.35); // Schwerthieb macht Lärm
+  makeNoise(0.35);
+  spawnSwingTrail(ps.weapon);
 }
 
 function fireKi() {
@@ -1197,20 +1240,29 @@ function damageEnemy(e, amount) {
   e.hpBar.visible = true;
   updateHpBar(e.hpBar, e.hp/e.maxHp);
   showDamageNumber(e.obj.position, dmg, "#ff6b5b");
+  e.hitT = 0.18;
+  spawnBloodBurst(e.obj.position);
   if (e.hp <= 0) killEnemy(e);
   else if (e.state === "patrol" || e.state === "return") { e.state = "chase"; e.lastKnown.copy(playerObj.position); }
 }
 
 function killEnemy(e) {
   e.dead = true;
+  e.dying = true;
+  e.dyingT = 1.0;
+  // Make all meshes transparent for fade-out death animation
+  e.obj.traverse(o=>{
+    if(o.isMesh && o.material){
+      const m = o.material.clone();
+      m.transparent = true; m.depthWrite = false;
+      o.material = m;
+    }
+  });
   const dropPos = e.obj.position.clone();
-  scene.remove(e.obj);
-  e.obj.traverse(o=>{ if(o.geometry) o.geometry.dispose(); });
   playerState.kills++;
   gainXp(e.xp);
   if (e.type === "boss") { winGame(); return; }
   showMsg(e.type === "demon" ? "Oni erschlagen!" : e.type === "zombie" ? "Zombie erledigt!" : "Samurai besiegt!", "#e8c97a");
-  // Zufällige Beute
   const chance = e.type === "demon" ? 0.5 : 0.25;
   if (Math.random() < chance) {
     const loot = e.type === "demon"
@@ -1237,7 +1289,7 @@ function damagePlayer(amount) {
   const ps = playerState;
   if (ps.hurtCooldown > 0) return;
   const dmg = Math.max(1, Math.round(amount - ps.defense*0.5));
-  ps.hp -= dmg; ps.hurtCooldown = 0.4;
+  ps.hp -= dmg; ps.hurtCooldown = 0.4; ps.hurtAnimT = 0.32;
   flash(0.5);
   if (ps.hp <= 0 && !gameOver) loseGame();
 }
@@ -1309,6 +1361,12 @@ function checkZone() {
 
 function updatePlayer(dt) {
   const ps = playerState;
+  // Player death fall animation
+  if (playerObj.userData.dying) {
+    playerObj.rotation.z = Math.min(Math.PI/2, playerObj.rotation.z + dt*2.2);
+    playerObj.position.y = Math.max(-0.6, playerObj.position.y - dt*0.25);
+    return;
+  }
   const forward = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
   const right = new THREE.Vector3(Math.cos(camYaw), 0, -Math.sin(camYaw));
   const move = new THREE.Vector3();
@@ -1352,6 +1410,14 @@ function updatePlayer(dt) {
   }
   if (ps.berserkT > 0) ps.berserkT -= dt;
 
+  // Hurt recoil: brief backward tilt when taking damage
+  if (ps.hurtAnimT > 0) {
+    ps.hurtAnimT -= dt;
+    playerObj.rotation.x = Math.sin((1 - ps.hurtAnimT/0.32) * Math.PI) * -0.28;
+  } else {
+    playerObj.rotation.x *= 0.75;
+  }
+
   ps.ki = Math.min(ps.maxKi, ps.ki + dt*3);
   if (ps.kiCooldown > 0) ps.kiCooldown -= dt;
   if (ps.hurtCooldown > 0) ps.hurtCooldown -= dt;
@@ -1388,6 +1454,20 @@ function faceTowards(obj, targetPos, dt, rate) {
 function playerDead(){ return gameOver || playerState.hp <= 0; }
 
 function updateEnemy(e, dt) {
+  // Dying fall+fade animation
+  if (e.dying) {
+    e.dyingT -= dt;
+    e.obj.rotation.x = Math.min(Math.PI*0.48, e.obj.rotation.x + dt*2.8);
+    e.obj.position.y -= dt * 0.35;
+    const opacity = Math.max(0, e.dyingT);
+    e.obj.traverse(o=>{ if(o.isMesh && o.material) o.material.opacity = opacity; });
+    if (e.dyingT <= 0) {
+      scene.remove(e.obj);
+      e.obj.traverse(o=>{ if(o.geometry) o.geometry.dispose(); });
+      e.dying = false;
+    }
+    return;
+  }
   if (e.dead) return;
   const obj = e.obj;
   const toPlayer = tmpV.copy(playerObj.position).sub(obj.position); toPlayer.y = 0;
@@ -1481,6 +1561,16 @@ function updateEnemy(e, dt) {
   e.walkPhase += dt * (moving ? e.speed*speedMul : 0) * 1.1;
   const sw = moving ? Math.sin(e.walkPhase)*0.5 : 0;
   obj.userData.lLegPivot.rotation.x = sw; obj.userData.rLegPivot.rotation.x = -sw;
+
+  // Hit flash: briefly illuminate enemy red when struck
+  if (e.hitT > 0) {
+    e.hitT -= dt;
+    const f = Math.max(0, e.hitT / 0.18);
+    obj.traverse(o=>{ if(o.isMesh && o.material && o.material.emissive) o.material.emissive.setRGB(f*0.9, f*0.15, f*0.15); });
+  } else if (e.hitT !== undefined && e.hitT <= 0 && e.hitT > -dt*1.5) {
+    obj.traverse(o=>{ if(o.isMesh && o.material && o.material.emissive) o.material.emissive.setRGB(0,0,0); });
+    e.hitT = -1;
+  }
 }
 
 function updateAlly(a, dt) {
@@ -1557,14 +1647,23 @@ function updatePetals(dt) {
   }
   for (let i=petals.length-1;i>=0;i--){
     const p = petals[i];
-    p.position.y += p.userData.vy * dt;
-    p.position.x += p.userData.drift * dt;
-    p.rotation.x += p.userData.spin*dt; p.rotation.y += p.userData.spin*dt;
-    let dead = p.position.y < 0.1;
-    if (p.userData.life !== undefined) {
-      p.userData.life -= dt;
-      p.material.opacity = Math.max(0, p.userData.life);
-      if (p.userData.life <= 0) dead = true;
+    const ud = p.userData;
+    // gravity-aware blood particles have vx/vz/grav
+    if (ud.grav !== undefined) {
+      ud.vy += ud.grav * dt;
+      p.position.x += ud.vx * dt;
+      p.position.y += ud.vy * dt;
+      p.position.z += ud.vz * dt;
+    } else {
+      p.position.y += ud.vy * dt;
+      p.position.x += (ud.drift || 0) * dt;
+    }
+    if (ud.spin) { p.rotation.x += ud.spin*dt; p.rotation.y += ud.spin*dt; }
+    let dead = p.position.y < 0.05;
+    if (ud.life !== undefined) {
+      ud.life -= dt;
+      p.material.opacity = Math.max(0, ud.life / (ud.grav !== undefined ? 0.5 : 1.0));
+      if (ud.life <= 0) dead = true;
     }
     if (dead) { scene.remove(p); p.geometry.dispose(); petals.splice(i,1); }
   }
@@ -1669,12 +1768,17 @@ function togglePause() {
 function loseGame() {
   gameOver = true;
   document.exitPointerLock();
-  const t = document.getElementById("endTitle");
-  t.textContent = "Gefallen"; t.style.color = "#ff5b5b";
-  document.getElementById("endText").textContent =
-    "Takeshi ist im Schatten des Heian gefallen. Seine Ehre bleibt unerfüllt... Tötungen: " + playerState.kills + ", Stufe " + playerState.level + ".";
-  document.getElementById("endScreen").classList.remove("hidden");
-  document.getElementById("hud").classList.add("hidden");
+  // Start death fall animation
+  playerObj.userData.dying = true;
+  flash(1.0);
+  setTimeout(()=>{
+    const t = document.getElementById("endTitle");
+    t.textContent = "Gefallen"; t.style.color = "#ff5b5b";
+    document.getElementById("endText").textContent =
+      "Takeshi ist im Schatten des Heian gefallen. Seine Ehre bleibt unerfüllt... Tötungen: " + playerState.kills + ", Stufe " + playerState.level + ".";
+    document.getElementById("endScreen").classList.remove("hidden");
+    document.getElementById("hud").classList.add("hidden");
+  }, 1500);
 }
 function winGame() {
   gameOver = true;
