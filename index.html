@@ -201,10 +201,14 @@ let camYaw = 0, camPitch = 0.25;
 let paused = false, gameStarted = false, gameOver = false;
 
 // ── Spielmodus ──
-let gameMode = "story"; // "story" | "dungeon" | "arena" | "timeattack"
+let gameMode = "story"; // "story" | "dungeon" | "arena" | "timeattack" | "zombie"
 let waveNumber = 0, waveActive = false;
 let timeLeft = 180, spawnTimer = 0, paSpawnTimer = 0;
 let arenaPowerupTimer = 0;
+// ── Zombie-Schleichmodus ──
+let noise = 0;            // aktueller Geräuschpegel (0..1)
+let zombieExit = null;    // Zielposition (Ausgang)
+let zombiesTotal = 0;
 
 const keys = {};
 let tmpV, tmpV2;
@@ -319,7 +323,7 @@ function buildHumanoid(opts) {
   g.add(lLegPivot); g.add(rLegPivot);
 
   const weaponGroup = new THREE.Group();
-  buildWeapon(weaponGroup, opts.weapon || "katana", opts.clanColor);
+  if (opts.weapon !== null) buildWeapon(weaponGroup, opts.weapon || "katana", opts.clanColor);
   weaponGroup.position.set(0, -0.85, 0.1);
   rArmPivot.add(weaponGroup);
 
@@ -750,12 +754,14 @@ function doAttack() {
   const ps = playerState;
   if (ps.attacking) return;
   ps.attacking = true; ps.swingT = 0; ps.hitDone = false;
+  makeNoise(0.35); // Schwerthieb macht Lärm
 }
 
 function fireKi() {
   const ps = playerState;
   if (ps.ki < 15 || ps.kiCooldown > 0) return;
   ps.ki -= 15; ps.kiCooldown = 0.6;
+  makeNoise(0.6); // Ki-Explosion ist sehr laut
   const ball = new THREE.Mesh(new THREE.SphereGeometry(0.45, 12, 12), emat(0x6ec6ff, 2));
   const halo = new THREE.Mesh(new THREE.SphereGeometry(0.7,12,12),
     new THREE.MeshBasicMaterial({ color: 0x6ec6ff, transparent: true, opacity: 0.3 }));
@@ -796,6 +802,10 @@ function spawnEnemy(type, x, z) {
   } else if (type === "demon") {
     opts = { armorColor: 0x2a1a2a, skinColor: 0x6a2a3a, clanColor: 0xff3030, hair: "bald", weapon: "nodachi", horns: true, scale: 1.15 };
     hp=90; dmg=14; def=9; speed=6; sight=34; fov=Math.PI*0.85; xp=60;
+  } else if (type === "zombie") {
+    // Langsam, schlechte Augen (man kann vorbeischleichen) — reagieren aber auf Geräusche
+    opts = { armorColor: 0x3a4a32, skinColor: 0x7a9a6a, clanColor: 0x2a3a22, hair: "bald", weapon: null };
+    hp=40; dmg=12; def=2; speed=2.2; sight=10; fov=Math.PI*0.5; xp=25;
   } else {
     opts = { armorColor: 0x1a0a1a, skinColor: 0x8a1a3a, clanColor: 0x9b30ff, hair: "helmet", weapon: "nodachi", horns: true, scale: 2.2 };
     hp=600; dmg=24; def=14; speed=5; sight=60; fov=Math.PI; xp=500;
@@ -1009,6 +1019,110 @@ function endRun() {
   document.getElementById("hud").classList.add("hidden");
 }
 
+// ── ZOMBIE-SCHLEICHMODUS ──────────────────────────────────────────
+// Ein geschlossenes, dunkles Gebäude. Zombies sehen kaum, hören aber gut:
+// Rennen (Shift) und Angreifen erzeugt Lärm und weckt sie. Schleiche zum Ausgang.
+function buildZombieHouse() {
+  scene.background = new THREE.Color(0x020203);
+  scene.fog = new THREE.Fog(0x020204, 5, 30);
+  // Reihe von Räumen entlang -z, durch enge Türen verbunden. Start z=70, Ausgang am Ende.
+  const roomZ = [70, 38, 6, -26, -58];
+  const RW = 30, RD = 26, GAP = 5;
+  for (let ri=0; ri<roomZ.length; ri++) {
+    const rz = roomZ[ri];
+    // Boden (Holzdielen-Optik)
+    const f = new THREE.Mesh(new THREE.BoxGeometry(RW, 0.4, RD), mat(0x2a2018, { roughness: 1 }));
+    f.position.set(0, -0.2, rz); f.receiveShadow = true; scene.add(f);
+    // Decke
+    const ceil = new THREE.Mesh(new THREE.BoxGeometry(RW, 0.4, RD), mat(0x14100c, { roughness: 1 }));
+    ceil.position.set(0, 6, rz); scene.add(ceil);
+    // Seitenwände
+    buildWall(-RW/2, rz, 1.2, RD, 6); buildWall(RW/2, rz, 1.2, RD, 6);
+    // Vorder-/Rückwand mit Türöffnung (außer am Start hinten und Ausgang vorn)
+    const seg = (RW - GAP) / 2;
+    buildWall(-(GAP/2+seg/2), rz - RD/2, seg, 1.2, 6);
+    buildWall( (GAP/2+seg/2), rz - RD/2, seg, 1.2, 6);
+    buildWall(-(GAP/2+seg/2), rz + RD/2, seg, 1.2, 6);
+    buildWall( (GAP/2+seg/2), rz + RD/2, seg, 1.2, 6);
+    if (ri === 0) buildWall(0, rz + RD/2, GAP+0.2, 1.2, 6); // hinten verschlossen
+    // schwaches Mondlicht durch ein "Fenster" + vereinzelte trübe Lampen
+    const lamp = new THREE.PointLight(0x6688aa, 0.7, 20, 2);
+    lamp.position.set((ri%2?1:-1)*8, 4.5, rz); scene.add(lamp);
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), emat(0x88aacc, 0.6));
+    bulb.position.copy(lamp.position); scene.add(bulb);
+    // ein paar Möbel/Hindernisse als Schatten
+    for (let k=0;k<2;k++){
+      const crate = new THREE.Mesh(new THREE.BoxGeometry(2, 1.6, 2), mat(0x3a2c1c));
+      crate.position.set((Math.random()-0.5)*(RW-8), 0.8, rz + (Math.random()-0.5)*(RD-8));
+      crate.castShadow = true; scene.add(crate);
+    }
+    // Korridor zum nächsten Raum
+    if (ri < roomZ.length-1) {
+      const nz = roomZ[ri+1];
+      const midZ = (rz + nz)/2;
+      const cf = new THREE.Mesh(new THREE.BoxGeometry(GAP, 0.4, Math.abs(rz-nz)-RD), mat(0x2a2018));
+      cf.position.set(0, -0.2, midZ); cf.receiveShadow = true; scene.add(cf);
+      buildWall(-(GAP/2+0.6), midZ, 1.2, Math.abs(rz-nz)-RD, 6);
+      buildWall( (GAP/2+0.6), midZ, 1.2, Math.abs(rz-nz)-RD, 6);
+    }
+  }
+  // Ausgang im letzten Raum: leuchtende grüne Tür
+  const exitZ = roomZ[roomZ.length-1] - RD/2;
+  const door = new THREE.Mesh(new THREE.BoxGeometry(GAP, 5, 0.6), emat(0x33ff77, 0.8));
+  door.position.set(0, 2.5, exitZ); scene.add(door);
+  const dl = new THREE.PointLight(0x33ff77, 2, 16, 2); dl.position.set(0, 3, exitZ); scene.add(dl);
+  const sign = makeMarker("➜", "#33ff77"); sign.position.set(0, 4.2, exitZ); sign.scale.set(2,2,1); scene.add(sign);
+  zombieExit = new THREE.Vector3(0, 0, exitZ);
+}
+
+function populateZombies() {
+  zombiesTotal = 0;
+  const roomZ = [70, 38, 6, -26, -58];
+  // Im Startraum nur wenige, danach immer mehr
+  const perRoom = [1, 3, 4, 5, 4];
+  roomZ.forEach((rz, ri) => {
+    for (let i=0;i<perRoom[ri];i++){
+      const x = (Math.random()-0.5)*22;
+      const z = rz + (Math.random()-0.5)*18;
+      const e = spawnEnemy("zombie", x, z);
+      // Zombie-Pose: beide Arme nach vorne, leicht gebeugt
+      e.obj.userData.lArmPivot.rotation.x = -1.4;
+      e.obj.userData.rArmPivot.rotation.x = -1.4;
+      zombiesTotal++;
+    }
+  });
+  // wenige, aber wertvolle Pickups
+  spawnPickup("heal", 8, 64);
+  spawnPickup("ki", -8, 0);
+  spawnPickup("heal", 8, -30);
+  spawnPickup("weapon", -8, -52, "masamune");
+}
+
+function updateZombieMode(dt) {
+  // Geräusch klingt langsam ab
+  noise = Math.max(0, noise - dt * 0.4);
+  const livingZ = enemies.filter(e=>!e.dead).length;
+  const stealth = noise < 0.15 ? "🟢 lautlos" : noise < 0.45 ? "🟡 hörbar" : "🔴 LAUT!";
+  setModeInfo("Schleichen — " + stealth + "  ·  Zombies: " + livingZ + "/" + zombiesTotal);
+  // Ausgang erreicht?
+  if (zombieExit && playerObj.position.distanceTo(zombieExit) < 3.5) {
+    gameOver = true;
+    document.exitPointerLock();
+    const t = document.getElementById("endTitle");
+    t.textContent = "Entkommen!"; t.style.color = "#33ff77";
+    document.getElementById("endText").textContent =
+      "Du hast das Gebäude lebend verlassen! Erschlagene Zombies: " + playerState.kills + ".";
+    document.getElementById("endScreen").classList.remove("hidden");
+    document.getElementById("hud").classList.add("hidden");
+  }
+}
+
+// Erzeugt Lärm an der Spielerposition (von Rennen/Angriff/Ki ausgelöst)
+function makeNoise(amount) {
+  if (gameMode !== "zombie") return;
+  noise = Math.min(1, noise + amount);
+}
+
 function damageEnemy(e, amount) {
   if (e.dead) return;
   const dmg = Math.max(2, Math.round(amount - e.def*0.4));
@@ -1028,7 +1142,7 @@ function killEnemy(e) {
   playerState.kills++;
   gainXp(e.xp);
   if (e.type === "boss") { winGame(); return; }
-  showMsg(e.type === "demon" ? "Oni erschlagen!" : "Samurai besiegt!", "#e8c97a");
+  showMsg(e.type === "demon" ? "Oni erschlagen!" : e.type === "zombie" ? "Zombie erledigt!" : "Samurai besiegt!", "#e8c97a");
   // Zufällige Beute
   const chance = e.type === "demon" ? 0.5 : 0.25;
   if (Math.random() < chance) {
@@ -1148,6 +1262,8 @@ function updatePlayer(dt) {
     while (dy < -Math.PI) dy += Math.PI*2;
     playerObj.rotation.y += dy * Math.min(1, dt*12);
     ps.walkPhase += dt * spd * 1.1;
+    // Lärm: Rennen ist laut, Gehen fast lautlos
+    makeNoise(dt * (keys["shift"] ? 1.2 : 0.18));
   }
   playerObj.position.x = THREE.MathUtils.clamp(playerObj.position.x, -180, 180);
   playerObj.position.z = THREE.MathUtils.clamp(playerObj.position.z, -180, 100);
@@ -1212,6 +1328,10 @@ function updateEnemy(e, dt) {
   const dirToPlayer = tmpV2.copy(toPlayer).normalize();
   const angle = facing.dot(dirToPlayer);
   const canSee = dist < e.sight && angle > Math.cos(e.fov/2) && !playerDead();
+  // Zombies hören Lärm: je lauter, desto weiter. aware = gesehen ODER gehört.
+  const canHear = (e.type === "zombie") && !playerDead() && noise > 0.1 && dist < (6 + noise*45);
+  const aware = canSee || canHear;
+  if (canHear) e.lastKnown.copy(playerObj.position);
 
   if (e.atkCd > 0) e.atkCd -= dt;
   e.stateT += dt;
@@ -1225,20 +1345,20 @@ function updateEnemy(e, dt) {
       const wp = e.wps[e.wp];
       moveTarget = wp; speedMul = 0.5;
       if (obj.position.distanceTo(wp) < 2) e.wp = (e.wp+1) % e.wps.length;
-      if (canSee) { e.state = "alert"; e.stateT = 0; }
+      if (aware) { e.state = "alert"; e.stateT = 0; }
       break;
     }
     case "alert": {
       e.mark.visible = true; e.mark.lookAt(camera.position);
-      faceTowards(obj, playerObj.position, dt, 4);
-      if (e.stateT > 1.5) { e.state = canSee ? "chase" : "return"; e.lastKnown.copy(playerObj.position); }
+      faceTowards(obj, e.lastKnown, dt, 4);
+      if (e.stateT > (e.type==="zombie"?0.6:1.5)) { e.state = aware ? "chase" : "return"; if (canSee) e.lastKnown.copy(playerObj.position); }
       break;
     }
     case "chase": {
-      moveTarget = playerObj.position; speedMul = 1;
+      moveTarget = canSee ? playerObj.position : e.lastKnown; speedMul = 1;
       if (canSee) e.lastKnown.copy(playerObj.position);
       if (dist < (e.type==="boss"?5:2.3)) e.state = "attack";
-      if (!canSee && dist > e.sight*0.8) { e.state = "search"; e.stateT = 0; }
+      if (!aware && dist > e.sight*0.8) { e.state = "search"; e.stateT = 0; }
       break;
     }
     case "attack": {
@@ -1252,13 +1372,13 @@ function updateEnemy(e, dt) {
     }
     case "search": {
       moveTarget = e.lastKnown; speedMul = 0.7;
-      if (canSee) e.state = "chase";
+      if (aware) e.state = "chase";
       if (obj.position.distanceTo(e.lastKnown) < 2 || e.stateT > 6) { e.state = "return"; e.stateT = 0; }
       break;
     }
     case "return": {
       moveTarget = e.wps[0]; speedMul = 0.5;
-      if (canSee) e.state = "chase";
+      if (aware) e.state = "chase";
       if (obj.position.distanceTo(e.wps[0]) < 2) e.state = "patrol";
       break;
     }
@@ -1415,6 +1535,7 @@ function animate() {
       if (gameMode === "story") checkZone();
       else if (gameMode === "arena") updateArena(dt);
       else if (gameMode === "timeattack") updateTimeAttack(dt);
+      else if (gameMode === "zombie") updateZombieMode(dt);
       updateHud();
       if (msgTimer > 0) { msgTimer -= dt; if (msgTimer <= 0) msgEl.style.opacity = 0; }
     } else {
@@ -1601,6 +1722,12 @@ function startGame() {
       buildArena();
       playerObj.position.set(0, 0, 0);
       timeLeft = 180; paSpawnTimer = 0;
+    } else if (gameMode === "zombie") {
+      buildZombieHouse();
+      playerObj.position.set(0, 0, 78);
+      noise = 0;
+      populateZombies();
+      showMsg("Sei leise... erreiche den grünen Ausgang!", "#33ff77");
     }
   } catch (err) {
     showFatal((err && err.stack) ? err.stack : String(err));
@@ -1617,7 +1744,8 @@ const MODES = [
   { id: "story",      label: "Story",          desc: "Die offene Welt: Dorf, Bambushain, Schrein und Schloss — stelle dich dem Dämonenfürsten." },
   { id: "dungeon",    label: "Verlies",        desc: "Ein dunkles Verlies aus Steinräumen, beleuchtet von flackernden Fackeln. Kämpfe dich durch zum Boss." },
   { id: "arena",      label: "Endlos-Arena",   desc: "Eine geschlossene Arena. Überlebe immer größere Gegnerwellen. Es gibt kein Ende — nur Ruhm." },
-  { id: "timeattack", label: "Zeit-Rausch",    desc: "180 Sekunden. Erschlage so viele Gegner wie möglich, bevor die Zeit abläuft." }
+  { id: "timeattack", label: "Zeit-Rausch",    desc: "180 Sekunden. Erschlage so viele Gegner wie möglich, bevor die Zeit abläuft." },
+  { id: "zombie",     label: "Zombie-Schleichen", desc: "Ein dunkles, geschlossenes Gebäude voller Zombies. Sie sehen kaum — hören aber gut. Gehe leise (NICHT rennen!) und erreiche den Ausgang." }
 ];
 function buildModeSelectUI() {
   const ch = document.getElementById("modeCh");
