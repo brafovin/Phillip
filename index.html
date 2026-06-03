@@ -51,7 +51,8 @@
   #kiFill { background: linear-gradient(90deg, #2980b9, #6ec6ff); }
   #xpFill { background: linear-gradient(90deg, #b8860b, #ffd95a); }
   #reticle { position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
-    border-radius: 50%; background: rgba(255,255,255,0.6); box-shadow: 0 0 6px #000; }
+    border-radius: 50%; background: rgba(255,255,255,0.6); box-shadow: 0 0 6px #000; transition: transform .08s, background .08s; }
+  #reticle.hit { transform: scale(2.6); background: rgba(255,210,120,0.95); }
   #msg { position: absolute; top: 22%; left: 50%; transform: translateX(-50%); font-size: 26px; color: #e8c97a;
     text-shadow: 0 0 12px #000, 0 0 20px rgba(220,100,100,0.6); opacity: 0; transition: opacity .4s; letter-spacing: 3px; }
   #controlsHint { position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%); font-size: 13px;
@@ -218,6 +219,13 @@ let collisionEnabled = false;
 
 const keys = {};
 let tmpV, tmpV2;
+
+// ── Effekt-Status (Kamera-Wackeln, Hit-Stop/Zeitlupe) ──
+let camShake = 0;        // verbleibende Wackel-Stärke
+let hitStop = 0;         // Sekunden Restzeit der Zeitlupe
+let timeScale = 1;       // globaler Zeitfaktor (1 = normal)
+function addShake(amount) { camShake = Math.min(1.2, camShake + amount); }
+function addHitStop(sec) { hitStop = Math.max(hitStop, sec); }
 
 let pRenderer, pScene, pCamera, pPlayer, pClock;
 const petalOrigins = [];
@@ -757,6 +765,41 @@ function spawnBloodBurst(pos) {
   }
 }
 
+// Expandierender Aufprall-Ring an Position (Schlagtreffer / Ki-Explosion)
+const rings = [];
+function spawnImpactRing(pos, color, maxR) {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.1, 0.3, 24),
+    new THREE.MeshBasicMaterial({ color: color||0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
+  ring.position.copy(pos); ring.position.y += 1.2;
+  ring.lookAt(camera.position);
+  ring.userData = { t: 0, max: maxR || 2.4 };
+  scene.add(ring); rings.push(ring);
+}
+function spawnSparks(pos, color) {
+  for (let i=0;i<6;i++){
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.05, 4, 4),
+      new THREE.MeshBasicMaterial({ color: color||0xffe080, transparent: true, opacity: 1 }));
+    const a = Math.random()*Math.PI*2, e = Math.random()*Math.PI*0.5;
+    const spd = 4 + Math.random()*4;
+    s.position.copy(pos).add(new THREE.Vector3(0,1.4,0));
+    s.userData = { vx: Math.cos(a)*Math.cos(e)*spd, vy: Math.sin(e)*spd+2, vz: Math.sin(a)*Math.cos(e)*spd,
+      grav: -10, life: 0.3, spin: 0 };
+    scene.add(s); petals.push(s);
+  }
+}
+function updateRings(dt) {
+  for (let i=rings.length-1;i>=0;i--){
+    const r = rings[i];
+    r.userData.t += dt;
+    const p = r.userData.t / 0.35;
+    const s = 0.3 + p * r.userData.max;
+    r.scale.set(s, s, s);
+    r.material.opacity = Math.max(0, 0.85 * (1 - p));
+    if (p >= 1) { scene.remove(r); r.geometry.dispose(); rings.splice(i,1); }
+  }
+}
+
 function spawnSwingTrail(weapon) {
   const w = WEAPONS[weapon] || WEAPONS.katana;
   const segments = 7;
@@ -1242,6 +1285,10 @@ function damageEnemy(e, amount) {
   showDamageNumber(e.obj.position, dmg, "#ff6b5b");
   e.hitT = 0.18;
   spawnBloodBurst(e.obj.position);
+  spawnSparks(e.obj.position, 0xfff0a0);
+  // Knockback in Richtung weg vom Spieler
+  tmpV2.copy(e.obj.position).sub(playerObj.position).setY(0);
+  if (tmpV2.lengthSq() > 0.001) { tmpV2.normalize(); e.obj.position.addScaledVector(tmpV2, 0.35); }
   if (e.hp <= 0) killEnemy(e);
   else if (e.state === "patrol" || e.state === "return") { e.state = "chase"; e.lastKnown.copy(playerObj.position); }
 }
@@ -1290,7 +1337,7 @@ function damagePlayer(amount) {
   if (ps.hurtCooldown > 0) return;
   const dmg = Math.max(1, Math.round(amount - ps.defense*0.5));
   ps.hp -= dmg; ps.hurtCooldown = 0.4; ps.hurtAnimT = 0.32;
-  flash(0.5);
+  flash(0.5); addShake(0.4); spawnBloodBurst(playerObj.position);
   if (ps.hp <= 0 && !gameOver) loseGame();
 }
 
@@ -1398,13 +1445,24 @@ function updatePlayer(dt) {
   const sw = moving ? Math.sin(ps.walkPhase)*0.6 : 0;
   ud.lLegPivot.rotation.x = sw; ud.rLegPivot.rotation.x = -sw;
   if (!ps.attacking) ud.lArmPivot.rotation.x = -sw*0.7;
+  // Idle-Atmung + sanftes Wiegen beim Gehen
+  ud.breathe = (ud.breathe || 0) + dt;
+  if (ud.head) ud.head.position.y = 2.36 + Math.sin(ud.breathe*2)*0.012;
+  if (!moving && !ps.attacking) {
+    ud.lArmPivot.rotation.x = Math.sin(ud.breathe*2)*0.04 - 0.05;
+  }
 
   if (ps.attacking) {
     const swing = (WEAPONS[ps.weapon] || WEAPONS.katana).swing;
     ps.swingT += dt;
     const p = Math.min(ps.swingT / swing, 1);
-    ud.rArmPivot.rotation.x = -2.2 + Math.sin(p*Math.PI)*3.0;
-    ud.rArmPivot.rotation.z = Math.sin(p*Math.PI)*0.5;
+    // kraftvoller Diagonalhieb: Ausholen -> schneller Durchschlag
+    const eased = p < 0.35 ? (p/0.35)*0.4 : 0.4 + Math.sin((p-0.35)/0.65*Math.PI*0.5)*0.6;
+    ud.rArmPivot.rotation.x = -2.4 + eased*3.4;
+    ud.rArmPivot.rotation.z = Math.sin(p*Math.PI)*0.6;
+    ud.rArmPivot.rotation.y = -Math.sin(p*Math.PI)*0.4;
+    // Körper-Drehung in den Schlag hinein
+    ud.lArmPivot.rotation.x = Math.sin(p*Math.PI)*0.8;
     if (ps.swingT >= swing*0.5 && !ps.hitDone) { ps.hitDone = true; meleeHit(); }
     if (ps.swingT >= swing) { ps.attacking = false; ps.hitDone = false; ud.rArmPivot.rotation.set(0,0,0); }
   }
@@ -1431,14 +1489,24 @@ function meleeHit() {
   const berserk = ps.berserkT > 0 ? 2 : 1;
   const dmg = (ps.strength + (keys["shift"]?4:0)) * w.dmgMult * berserk;
   const fwd = new THREE.Vector3(Math.sin(playerObj.rotation.y), 0, Math.cos(playerObj.rotation.y));
+  let hitAny = false;
   for (const e of enemies) {
     if (e.dead) continue;
     tmpV.copy(e.obj.position).sub(playerObj.position); tmpV.y = 0;
     const dist = tmpV.length();
     if (dist < reach) {
       tmpV.normalize();
-      if (tmpV.dot(fwd) > w.arc) damageEnemy(e, dmg);
+      if (tmpV.dot(fwd) > w.arc) {
+        damageEnemy(e, dmg);
+        spawnImpactRing(e.obj.position, 0xfff0c0, 2.6);
+        hitAny = true;
+      }
     }
+  }
+  if (hitAny) {
+    addHitStop(0.06); addShake(0.25);
+    const ret = document.getElementById("reticle");
+    if (ret) { ret.classList.add("hit"); setTimeout(()=>ret.classList.remove("hit"), 90); }
   }
 }
 
@@ -1617,6 +1685,13 @@ function updateProjectiles(dt) {
     const p = projectiles[i];
     p.mesh.position.addScaledVector(p.dir, 30*dt);
     p.life -= dt;
+    // glühende Spur hinter dem Geschoss
+    const trailC = p.owner === "player" ? 0x6ec6ff : 0x9b30ff;
+    const tr = new THREE.Mesh(new THREE.SphereGeometry(0.3, 6, 6),
+      new THREE.MeshBasicMaterial({ color: trailC, transparent: true, opacity: 0.5, depthWrite: false }));
+    tr.position.copy(p.mesh.position);
+    tr.userData = { vy: 0, life: 0.25, spin: 0 };
+    scene.add(tr); petals.push(tr);
     let hit = false;
     if (p.owner === "player") {
       for (const e of enemies) {
@@ -1629,6 +1704,11 @@ function updateProjectiles(dt) {
       if (p.mesh.position.distanceTo(tmpV.copy(playerObj.position).setY(1.5)) < 1.8) {
         damagePlayer(p.dmg); hit = true;
       }
+    }
+    if (hit) {
+      spawnImpactRing(p.mesh.position, p.owner==="player"?0x6ec6ff:0x9b30ff, 3.2);
+      spawnSparks(p.mesh.position, p.owner==="player"?0x6ec6ff:0x9b30ff);
+      addShake(0.2);
     }
     if (hit || p.life <= 0) {
       scene.remove(p.mesh); p.mesh.geometry.dispose(); projectiles.splice(i,1);
@@ -1678,14 +1758,27 @@ function updateCamera(dt) {
   );
   tmpV.copy(playerObj.position).add(offset);
   camera.position.lerp(tmpV, Math.min(1, dt*6));
+  // Kamera-Wackeln
+  if (camShake > 0.001) {
+    camera.position.x += (Math.random()-0.5) * camShake;
+    camera.position.y += (Math.random()-0.5) * camShake;
+    camera.position.z += (Math.random()-0.5) * camShake;
+    camShake *= Math.pow(0.0001, dt); // schnell abklingen
+    if (camShake < 0.01) camShake = 0;
+  }
   tmpV2.copy(playerObj.position).add(new THREE.Vector3(0, 2.2, 0));
   camera.lookAt(tmpV2);
 }
 
 function animate() {
   requestAnimationFrame(animate);
-  const dt = Math.min(0.05, clock.getDelta());
+  const rawDt = Math.min(0.05, clock.getDelta());
   const t = clock.elapsedTime;
+
+  // Hit-Stop: kurze Zeitlupe nach kraftvollen Treffern
+  if (hitStop > 0) { hitStop -= rawDt; timeScale = 0.15; }
+  else timeScale = Math.min(1, timeScale + rawDt*4);
+  const dt = rawDt * timeScale;
 
   for (const l of lanternLights) l.intensity = 1.4 + Math.sin(t*8 + l.position.x)*0.25;
   for (const l of dungeonTorches) l.intensity = 1.8 + Math.sin(t*12 + l.position.x*0.5)*0.7 + (Math.random()-0.5)*0.3;
@@ -1696,9 +1789,10 @@ function animate() {
       for (const e of enemies) updateEnemy(e, dt);
       for (const a of allies) updateAlly(a, dt);
       updateProjectiles(dt);
-      updatePetals(dt);
+      updatePetals(rawDt);
+      updateRings(rawDt);
       updatePickups(dt);
-      updateCamera(dt);
+      updateCamera(rawDt);
       if (gameMode === "story") checkZone();
       else if (gameMode === "arena") updateArena(dt);
       else if (gameMode === "timeattack") updateTimeAttack(dt);
@@ -1706,7 +1800,9 @@ function animate() {
       updateHud();
       if (msgTimer > 0) { msgTimer -= dt; if (msgTimer <= 0) msgEl.style.opacity = 0; }
     } else {
-      updatePetals(dt);
+      updatePetals(rawDt);
+      updateRings(rawDt);
+      if (gameOver && playerObj && playerObj.userData.dying) { updatePlayer(rawDt); updateCamera(rawDt); }
     }
   } catch (err) {
     showFatal((err && err.stack) ? err.stack : String(err));
