@@ -149,8 +149,7 @@ let camYaw = 0, camPitch = 0.25;
 let paused = false, gameStarted = false, gameOver = false;
 
 const keys = {};
-const tmpV = new THREE.Vector3();
-const tmpV2 = new THREE.Vector3();
+let tmpV, tmpV2;
 
 let pRenderer, pScene, pCamera, pPlayer, pClock;
 const petalOrigins = [];
@@ -277,6 +276,9 @@ function makeMarker(text, color) {
 }
 
 function initRenderer() {
+  tmpV  = new THREE.Vector3();
+  tmpV2 = new THREE.Vector3();
+  clock = new THREE.Clock();
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -290,8 +292,6 @@ function initRenderer() {
 
   camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 600);
   camera.position.set(0, 6, 10);
-
-  clock = new THREE.Clock();
 }
 
 function initLights() {
@@ -1093,32 +1093,35 @@ function startGame() {
   document.getElementById("customize").classList.add("hidden");
   document.getElementById("hud").classList.remove("hidden");
   previewActive = false;
-  if (pRenderer) pRenderer.dispose();
+  if (pRenderer) { try { pRenderer.dispose(); } catch(e){} }
+
+  // Init Three.js main scene only now
+  initRenderer();
+  initLights();
+  buildSky();
+  buildGround();
+  bindInput();
 
   createPlayer();
   buildWorld();
   populate();
   gameStarted = true;
   clock.start();
+  animate();
 
   setTimeout(()=>{ const h = document.getElementById("controlsHint"); if (h) h.style.opacity = 0; }, 9000);
   showMsg("⛩ Dorf", "#e8c97a"); lastZone = "Dorf";
-  renderer.domElement.requestPointerLock();
+  try { renderer.domElement.requestPointerLock(); } catch(e) {}
 }
 
 function boot() {
-  initRenderer();
-  initLights();
-  buildSky();
-  buildGround();
-  bindInput();
-  animate();
+  // Wire up buttons only — no Three.js yet (avoids crash before user interaction)
   buildCustomizeUI();
 
   document.getElementById("introNext").onclick = ()=>{
     document.getElementById("intro").classList.add("hidden");
     document.getElementById("customize").classList.remove("hidden");
-    initPreview();
+    try { initPreview(); } catch(e) { console.warn("Preview error:", e); }
   };
   document.getElementById("startGame").onclick = startGame;
   document.getElementById("resumeBtn").onclick = togglePause;
