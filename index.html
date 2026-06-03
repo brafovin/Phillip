@@ -74,7 +74,7 @@
   </div>
   <div id="reticle"></div>
   <div id="msg"></div>
-  <div id="controlsHint">WASD bewegen · Maus umschauen · Shift rennen · Leertaste/Klick Angriff · Q Ki-Angriff · E Interagieren · ESC Pause</div>
+  <div id="controlsHint">WASD bewegen · Maus umschauen · Shift rennen · Leertaste/Klick Angriff · Q Ki-Angriff · E Interagieren · 1-6 Waffe wechseln · ESC Pause · Sammle leuchtende Power-Ups!</div>
 </div>
 <div id="flash"></div>
 
@@ -164,12 +164,26 @@ const CFG = {
 const ARMOR_SWATCHES = [0x3b5b8c, 0x7a2222, 0x2e6b3e, 0x4a4a55, 0x6a4a8c, 0x8c6a2a];
 const CLAN_SWATCHES  = [0xe8c97a, 0xff5b5b, 0x5bff9b, 0x6ec6ff, 0xffffff, 0xb066ff];
 
+// ── Waffen mit unterschiedlichen Werten ──────────────────────────
+// dmgMult: Schadensfaktor · reach: Reichweite · swing: Angriffsdauer (kleiner=schneller) · arc: Trefferwinkel
+const WEAPONS = {
+  katana:   { name: "Katana",        dmgMult: 1.0, reach: 3.2, swing: 0.30, arc: 0.30, color: 0xdfe6ee, tier: 1 },
+  dual:     { name: "Zwei Klingen",  dmgMult: 0.7, reach: 2.8, swing: 0.18, arc: 0.10, color: 0xc9f0ff, tier: 1 },
+  nodachi:  { name: "Nodachi",       dmgMult: 1.5, reach: 4.2, swing: 0.42, arc: 0.20, color: 0xe8eef5, tier: 2 },
+  naginata: { name: "Naginata",      dmgMult: 1.3, reach: 5.2, swing: 0.38, arc: 0.45, color: 0xd8e0c8, tier: 2 },
+  kanabo:   { name: "Kanabō-Keule",  dmgMult: 2.2, reach: 3.6, swing: 0.55, arc: 0.35, color: 0x5a4a3a, tier: 3 },
+  masamune: { name: "Masamune",      dmgMult: 2.0, reach: 4.0, swing: 0.24, arc: 0.40, color: 0xfff0a0, tier: 4 }
+};
+const WEAPON_KEYS = ["katana","dual","nodachi","naginata","kanabo","masamune"];
+
+
 let renderer, scene, camera, clock;
 let playerObj, playerState, ground;
 const enemies = [];
 const allies = [];
 const projectiles = [];
 const petals = [];
+const pickups = [];
 const interactables = [];
 let boss = null;
 let lanternLights = [];
@@ -255,9 +269,11 @@ function buildHumanoid(opts) {
 }
 
 function buildWeapon(group, type, guardColor) {
-  const bladeM = new THREE.MeshStandardMaterial({ color: 0xdfe6ee, metalness: 0.8, roughness: 0.2 });
+  const bladeColor = (WEAPONS[type] && WEAPONS[type].color) || 0xdfe6ee;
+  const bladeM = new THREE.MeshStandardMaterial({ color: bladeColor, metalness: 0.8, roughness: 0.2 });
   const hiltM = mat(0x222222);
   const guardM = emat(guardColor || 0xe8c97a, 0.4);
+  const shaftM = mat(0x5a3a1a);
   function katana(len, off) {
     off = off || 0;
     const blade = new THREE.Mesh(new THREE.BoxGeometry(0.06, len, 0.12), bladeM);
@@ -267,9 +283,56 @@ function buildWeapon(group, type, guardColor) {
     const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.3, 8), hiltM);
     hilt.position.set(off, -0.15, 0); group.add(hilt);
   }
+  function polearm(shaftLen, headLen) {
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, shaftLen, 8), shaftM);
+    shaft.position.set(0, shaftLen/2 - 0.3, 0); shaft.castShadow = true; group.add(shaft);
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.07, headLen, 0.16), bladeM);
+    blade.position.set(0.04, shaftLen - 0.3 + headLen/2, 0); blade.rotation.z = -0.25;
+    blade.castShadow = true; group.add(blade);
+  }
+  function club(len) {
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.5, 8), hiltM);
+    handle.position.set(0, 0.1, 0); group.add(handle);
+    const head = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.16, len, 8), bladeM);
+    head.position.set(0, 0.35 + len/2, 0); head.castShadow = true; group.add(head);
+    // Stacheln
+    for (let i=0;i<10;i++){
+      const sp = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 5), mat(0x888070));
+      const a = (i/10)*Math.PI*2, yy = 0.35 + len*(0.3 + (i%3)*0.25);
+      sp.position.set(Math.cos(a)*0.22, yy, Math.sin(a)*0.22);
+      sp.rotation.z = -Math.PI/2 + a; sp.rotation.y = -a; group.add(sp);
+    }
+  }
   if (type === "katana") katana(1.4);
   else if (type === "nodachi") katana(2.1);
   else if (type === "dual") { katana(1.0, -0.12); katana(1.0, 0.12); }
+  else if (type === "naginata") polearm(2.4, 1.0);
+  else if (type === "kanabo") club(1.4);
+  else if (type === "masamune") {
+    katana(1.7);
+    // leuchtende Aura der legendären Klinge
+    const glow = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.7, 0.22),
+      new THREE.MeshBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: 0.35 }));
+    glow.position.set(0, 0.85, 0); group.add(glow);
+  }
+  else katana(1.4);
+}
+
+// Tauscht das Waffenmodell in der Hand des Spielers aus
+function setPlayerWeapon(type) {
+  if (!WEAPONS[type]) return;
+  playerState.weapon = type;
+  const ud = playerObj.userData;
+  if (ud.weaponGroup) {
+    ud.rArmPivot.remove(ud.weaponGroup);
+    ud.weaponGroup.traverse(o=>{ if(o.geometry) o.geometry.dispose(); });
+  }
+  const wg = new THREE.Group();
+  buildWeapon(wg, type, CFG.clanColor);
+  wg.position.set(0, -0.85, 0.1);
+  ud.rArmPivot.add(wg);
+  ud.weaponGroup = wg;
+  updateHud();
 }
 
 function makeHpBar() {
@@ -496,6 +559,111 @@ function buildWorld() {
   makeCastle(0, -100);
   makeTorii(0, -70, 1.3);
   makeLantern(-14, -80); makeLantern(14, -80);
+
+  // ── Power-Ups & Waffen in der Welt verteilen ──
+  spawnPickup("heal",     -12, 50);
+  spawnPickup("ki",        20, 56);
+  spawnPickup("strength", -28, 46);
+  spawnPickup("weapon",    28, 42, "dual");        // Dorf: Zwei Klingen
+  spawnPickup("speed",      6, 12);
+  spawnPickup("weapon",   -18, 6,  "nodachi");      // Bambushain: Nodachi
+  spawnPickup("defense",   18, -4);
+  spawnPickup("heal",      -8, -22);
+  spawnPickup("weapon",     8, -30, "naginata");    // Schrein: Naginata
+  spawnPickup("ki",       -14, -40);
+  spawnPickup("berserk",   12, -48);
+  spawnPickup("strength", -16, -62);
+  spawnPickup("weapon",    16, -64, "kanabo");      // Schloss: Kanabō
+  spawnPickup("heal",      -10, -78);
+  spawnPickup("weapon",     0, -88, "masamune");    // legendäre Klinge vor dem Boss
+}
+
+// ── Power-Up- / Waffen-Pickup-System ─────────────────────────────
+const PICKUP_DEFS = {
+  heal:     { color: 0xff5b6b, label: "Heiltrank" },
+  ki:       { color: 0x6ec6ff, label: "Ki-Kristall" },
+  strength: { color: 0xff9b3a, label: "Stärke-Schrein" },
+  defense:  { color: 0xa0c0d0, label: "Eisen-Talisman" },
+  speed:    { color: 0x5bff9b, label: "Wind-Feder" },
+  berserk:  { color: 0xb066ff, label: "Berserker-Sake" },
+  weapon:   { color: 0xffe070, label: "Waffe" }
+};
+
+function spawnPickup(kind, x, z, weaponType) {
+  const def = PICKUP_DEFS[kind];
+  const g = new THREE.Group();
+  let mesh;
+  if (kind === "weapon") {
+    mesh = new THREE.Group();
+    buildWeapon(mesh, weaponType || "katana", 0xffe070);
+    mesh.scale.setScalar(0.8);
+    mesh.position.y = 1.4;
+  } else {
+    const geo = (kind === "heal") ? new THREE.OctahedronGeometry(0.45)
+      : (kind === "ki") ? new THREE.IcosahedronGeometry(0.45, 0)
+      : new THREE.BoxGeometry(0.7, 0.7, 0.7);
+    mesh = new THREE.Mesh(geo, emat(def.color, 1.4));
+    mesh.position.y = 1.4;
+  }
+  g.add(mesh);
+  // Lichtsäule + Glühen
+  const light = new THREE.PointLight(def.color, 1.6, 8, 2);
+  light.position.y = 1.4; g.add(light);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.5, 0.7, 16),
+    new THREE.MeshBasicMaterial({ color: def.color, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI/2; ring.position.y = 0.1; g.add(ring);
+  g.position.set(x, 0, z);
+  scene.add(g);
+  pickups.push({ kind, weaponType, obj: g, spinner: mesh, t: Math.random()*6, taken: false });
+}
+
+function updatePickups(dt) {
+  const ps = playerState;
+  for (const p of pickups) {
+    if (p.taken) continue;
+    p.t += dt;
+    p.spinner.rotation.y += dt * 1.5;
+    p.spinner.position.y = 1.4 + Math.sin(p.t*2) * 0.2;
+    if (playerObj.position.distanceTo(p.obj.position) < 2.2) collectPickup(p);
+  }
+}
+
+function collectPickup(p) {
+  const ps = playerState;
+  p.taken = true;
+  scene.remove(p.obj);
+  p.obj.traverse(o=>{ if(o.geometry) o.geometry.dispose(); });
+  let msg, color = "#e8c97a";
+  switch (p.kind) {
+    case "heal":     ps.hp = Math.min(ps.maxHp, ps.hp + 60); msg = "❤ +60 Leben"; color="#ff6b7b"; break;
+    case "ki":       ps.ki = Math.min(ps.maxKi, ps.ki + 50); msg = "✦ +50 Ki"; color="#6ec6ff"; break;
+    case "strength": ps.strength += 5; msg = "⚔ Stärke +5 (dauerhaft)"; color="#ff9b3a"; break;
+    case "defense":  ps.defense += 4; ps.maxHp += 25; ps.hp += 25; msg = "🛡 Verteidigung +4, max. HP +25"; color="#a0c0d0"; break;
+    case "speed":    ps.speed += 1.5; msg = "💨 Tempo erhöht"; color="#5bff9b"; break;
+    case "berserk":  ps.berserkT = 18; msg = "🔥 BERSERKER! Doppelter Schaden (18s)"; color="#b066ff"; break;
+    case "weapon": {
+      const w = WEAPONS[p.weaponType];
+      ps.weapons[p.weaponType] = true;
+      setPlayerWeapon(p.weaponType);
+      msg = "🗡 Neue Waffe: " + w.name + "!  (Taste " + (WEAPON_KEYS.indexOf(p.weaponType)+1) + " zum Wechseln)";
+      color = "#ffe070";
+      break;
+    }
+  }
+  showMsg(msg, color);
+  spawnPickupBurst(p.obj.position, PICKUP_DEFS[p.kind].color);
+  updateHud();
+}
+
+function spawnPickupBurst(pos, color) {
+  // kurzer Glanz-Effekt: ein paar aufsteigende Funken in Pickup-Farbe
+  for (let i=0;i<8;i++){
+    const pet = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95, side: THREE.DoubleSide }));
+    pet.position.copy(pos).add(new THREE.Vector3((Math.random()-0.5)*1.2, 1.2, (Math.random()-0.5)*1.2));
+    pet.userData = { vy: 1.5 + Math.random()*2, spin: Math.random()*4, drift: (Math.random()-0.5)*1.2, life: 1.0 };
+    scene.add(pet); petals.push(pet);
+  }
 }
 
 function createPlayer() {
@@ -511,7 +679,10 @@ function createPlayer() {
     strength: 12, defense: 6, speed: 8, kiPower: 14, kills: 0,
     attacking: false, swingT: 0, hitDone: false,
     kiCooldown: 0, hurtCooldown: 0, interactCooldown: 0,
-    walkPhase: 0
+    walkPhase: 0,
+    weapon: CFG.weapon,
+    weapons: { katana: true, [CFG.weapon]: true },  // anfangs Katana + gewählte Waffe
+    berserkT: 0, shieldT: 0, hasteT: 0
   };
 }
 
@@ -624,12 +795,21 @@ function damageEnemy(e, amount) {
 
 function killEnemy(e) {
   e.dead = true;
+  const dropPos = e.obj.position.clone();
   scene.remove(e.obj);
   e.obj.traverse(o=>{ if(o.geometry) o.geometry.dispose(); });
   playerState.kills++;
   gainXp(e.xp);
-  if (e.type === "boss") winGame();
-  else showMsg(e.type === "demon" ? "Oni erschlagen!" : "Samurai besiegt!", "#e8c97a");
+  if (e.type === "boss") { winGame(); return; }
+  showMsg(e.type === "demon" ? "Oni erschlagen!" : "Samurai besiegt!", "#e8c97a");
+  // Zufällige Beute
+  const chance = e.type === "demon" ? 0.5 : 0.25;
+  if (Math.random() < chance) {
+    const loot = e.type === "demon"
+      ? (Math.random()<0.4 ? "berserk" : Math.random()<0.5 ? "ki" : "heal")
+      : (Math.random()<0.6 ? "heal" : "ki");
+    spawnPickup(loot, dropPos.x, dropPos.z);
+  }
 }
 
 function gainXp(amount) {
@@ -684,13 +864,28 @@ function updateHud() {
   document.getElementById("hpFill").style.width = (100*ps.hp/ps.maxHp) + "%";
   document.getElementById("kiFill").style.width = (100*ps.ki/ps.maxKi) + "%";
   document.getElementById("xpFill").style.width = (100*ps.xp/ps.nextXp) + "%";
+  const w = WEAPONS[ps.weapon] || WEAPONS.katana;
+  // Waffen-Inventar als Leiste mit Tastennummern
+  let invHtml = "";
+  WEAPON_KEYS.forEach((wk, i)=>{
+    if (ps.weapons[wk]) {
+      const cur = wk === ps.weapon;
+      invHtml += "<span style='color:" + (cur?"#ffe070":"#888") + ";font-weight:" + (cur?"bold":"normal") + "'>" +
+        (i+1) + "·" + WEAPONS[wk].name + "</span> ";
+    }
+  });
+  const berserkLine = ps.berserkT > 0
+    ? "<span style='color:#b066ff'>🔥 Berserker " + ps.berserkT.toFixed(0) + "s</span><br>" : "";
   document.getElementById("stats").innerHTML =
     "<b>Takeshi</b> · Stufe " + ps.level + "<br>" +
     "HP " + Math.ceil(ps.hp) + "/" + ps.maxHp + "<br>" +
     "Ki " + Math.ceil(ps.ki) + "/" + ps.maxKi + "<br>" +
     "Stärke " + ps.strength + " · Verteidigung " + ps.defense + "<br>" +
     "Ki-Kraft " + ps.kiPower + " · Tempo " + ps.speed.toFixed(1) + "<br>" +
-    "Tötungen: " + ps.kills;
+    "Tötungen: " + ps.kills + "<br>" +
+    berserkLine +
+    "<b style='color:#ffe070'>Waffe: " + w.name + "</b> (×" + w.dmgMult + ")<br>" +
+    "<span style='font-size:11px'>" + invHtml + "</span>";
 }
 
 let lastZone = "";
@@ -736,13 +931,15 @@ function updatePlayer(dt) {
   if (!ps.attacking) ud.lArmPivot.rotation.x = -sw*0.7;
 
   if (ps.attacking) {
+    const swing = (WEAPONS[ps.weapon] || WEAPONS.katana).swing;
     ps.swingT += dt;
-    const p = Math.min(ps.swingT / 0.3, 1);
+    const p = Math.min(ps.swingT / swing, 1);
     ud.rArmPivot.rotation.x = -2.2 + Math.sin(p*Math.PI)*3.0;
     ud.rArmPivot.rotation.z = Math.sin(p*Math.PI)*0.5;
-    if (ps.swingT >= 0.15 && !ps.hitDone) { ps.hitDone = true; meleeHit(); }
-    if (ps.swingT >= 0.3) { ps.attacking = false; ps.hitDone = false; ud.rArmPivot.rotation.set(0,0,0); }
+    if (ps.swingT >= swing*0.5 && !ps.hitDone) { ps.hitDone = true; meleeHit(); }
+    if (ps.swingT >= swing) { ps.attacking = false; ps.hitDone = false; ud.rArmPivot.rotation.set(0,0,0); }
   }
+  if (ps.berserkT > 0) ps.berserkT -= dt;
 
   ps.ki = Math.min(ps.maxKi, ps.ki + dt*3);
   if (ps.kiCooldown > 0) ps.kiCooldown -= dt;
@@ -752,7 +949,10 @@ function updatePlayer(dt) {
 
 function meleeHit() {
   const ps = playerState;
-  const reach = (CFG.weapon === "nodachi" ? 4.2 : 3.2);
+  const w = WEAPONS[ps.weapon] || WEAPONS.katana;
+  const reach = w.reach;
+  const berserk = ps.berserkT > 0 ? 2 : 1;
+  const dmg = (ps.strength + (keys["shift"]?4:0)) * w.dmgMult * berserk;
   const fwd = new THREE.Vector3(Math.sin(playerObj.rotation.y), 0, Math.cos(playerObj.rotation.y));
   for (const e of enemies) {
     if (e.dead) continue;
@@ -760,7 +960,7 @@ function meleeHit() {
     const dist = tmpV.length();
     if (dist < reach) {
       tmpV.normalize();
-      if (tmpV.dot(fwd) > 0.3) damageEnemy(e, ps.strength + (keys["shift"]?4:0));
+      if (tmpV.dot(fwd) > w.arc) damageEnemy(e, dmg);
     }
   }
 }
@@ -945,7 +1145,13 @@ function updatePetals(dt) {
     p.position.y += p.userData.vy * dt;
     p.position.x += p.userData.drift * dt;
     p.rotation.x += p.userData.spin*dt; p.rotation.y += p.userData.spin*dt;
-    if (p.position.y < 0.1) { scene.remove(p); p.geometry.dispose(); petals.splice(i,1); }
+    let dead = p.position.y < 0.1;
+    if (p.userData.life !== undefined) {
+      p.userData.life -= dt;
+      p.material.opacity = Math.max(0, p.userData.life);
+      if (p.userData.life <= 0) dead = true;
+    }
+    if (dead) { scene.remove(p); p.geometry.dispose(); petals.splice(i,1); }
   }
 }
 
@@ -976,6 +1182,7 @@ function animate() {
       for (const a of allies) updateAlly(a, dt);
       updateProjectiles(dt);
       updatePetals(dt);
+      updatePickups(dt);
       updateCamera(dt);
       checkZone();
       updateHud();
@@ -1000,6 +1207,15 @@ function bindInput() {
     if (k === " ") { e.preventDefault(); doAttack(); }
     if (k === "q") fireKi();
     if (k === "e") interact();
+    // Waffenwechsel mit Tasten 1-6 (nur besessene Waffen)
+    if (k >= "1" && k <= "6") {
+      const wk = WEAPON_KEYS[parseInt(k,10)-1];
+      if (wk && playerState.weapons[wk]) {
+        if (wk !== playerState.weapon) { setPlayerWeapon(wk); showMsg("🗡 " + WEAPONS[wk].name, "#ffe070"); }
+      } else if (wk) {
+        showMsg("Diese Waffe besitzt du noch nicht.", "#aa8855");
+      }
+    }
   });
   window.addEventListener("keyup", (e)=>{ keys[e.key.toLowerCase()] = false; });
 
@@ -1074,7 +1290,7 @@ function buildCustomizeUI() {
     hairCh.appendChild(c);
   });
   const weaponCh = document.getElementById("weaponCh");
-  [["katana","Katana"],["nodachi","Nodachi"],["dual","Zwei Klingen"]].forEach(([v,l])=>{
+  [["katana","Katana (ausgewogen)"],["dual","Zwei Klingen (schnell)"],["nodachi","Nodachi (schwer)"]].forEach(([v,l])=>{
     const c = document.createElement("div"); c.className = "choice" + (v===CFG.weapon?" sel":""); c.textContent = l;
     c.onclick = ()=>{ CFG.weapon = v; selectChoice(weaponCh, c); rebuildPreview(); };
     weaponCh.appendChild(c);
