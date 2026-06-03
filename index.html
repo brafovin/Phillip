@@ -209,6 +209,9 @@ let arenaPowerupTimer = 0;
 let noise = 0;            // aktueller Geräuschpegel (0..1)
 let zombieExit = null;    // Zielposition (Ausgang)
 let zombiesTotal = 0;
+// ── Kollision (achsenparallele Boxen) ──
+const colliders = [];     // { minX, maxX, minZ, maxZ }
+let collisionEnabled = false;
 
 const keys = {};
 let tmpV, tmpV2;
@@ -871,9 +874,32 @@ function buildDungeonFloor(x, z, w, d) {
   const f = new THREE.Mesh(new THREE.BoxGeometry(w, 0.4, d), mat(0x26242c, { roughness: 1 }));
   f.position.set(x, -0.2, z); f.receiveShadow = true; scene.add(f);
 }
-function buildWall(x, z, w, d, h) {
-  const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h || 7, d), mat(0x1c1a22, { roughness: 1 }));
+function buildWall(x, z, w, d, h, color) {
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h || 7, d), mat(color || 0x1c1a22, { roughness: 1 }));
   wall.position.set(x, (h||7)/2, z); wall.castShadow = true; wall.receiveShadow = true; scene.add(wall);
+  addCollider(x, z, w, d);
+  return wall;
+}
+function addCollider(cx, cz, w, d) {
+  colliders.push({ minX: cx - w/2, maxX: cx + w/2, minZ: cz - d/2, maxZ: cz + d/2 });
+}
+// Schiebt den Spieler aus überlappenden Kollisionsboxen heraus
+function resolveCollisions(radius) {
+  const px = playerObj.position.x, pz = playerObj.position.z;
+  for (const c of colliders) {
+    const minX = c.minX - radius, maxX = c.maxX + radius;
+    const minZ = c.minZ - radius, maxZ = c.maxZ + radius;
+    if (px > minX && px < maxX && pz > minZ && pz < maxZ) {
+      // kleinste Eindringtiefe bestimmen und entlang dieser Achse herausschieben
+      const penL = px - minX, penR = maxX - px;
+      const penD = pz - minZ, penU = maxZ - pz;
+      const minPen = Math.min(penL, penR, penD, penU);
+      if (minPen === penL)      playerObj.position.x = minX;
+      else if (minPen === penR) playerObj.position.x = maxX;
+      else if (minPen === penD) playerObj.position.z = minZ;
+      else                      playerObj.position.z = maxZ;
+    }
+  }
 }
 function makeTorch(x, z) {
   const g = new THREE.Group();
@@ -1019,83 +1045,124 @@ function endRun() {
   document.getElementById("hud").classList.add("hidden");
 }
 
-// ── ZOMBIE-SCHLEICHMODUS ──────────────────────────────────────────
-// Ein geschlossenes, dunkles Gebäude. Zombies sehen kaum, hören aber gut:
-// Rennen (Shift) und Angreifen erzeugt Lärm und weckt sie. Schleiche zum Ausgang.
+// ── ZOMBIE-SCHLEICHMODUS (Labyrinth) ──────────────────────────────
+// Ein dunkles, geschlossenes Labyrinth. Zombies sehen kaum, hören aber gut:
+// Rennen/Angreifen erzeugt Lärm und weckt sie. Schleiche durch das Labyrinth zum Ausgang.
+const MAZE_COLS = 9, MAZE_ROWS = 11, MAZE_CELL = 7, MAZE_WALL = 0.9;
+let mazeGrid = null;
+// Zellmittelpunkt -> Weltkoordinate
+function mazeCellPos(r, c) {
+  return {
+    x: -(MAZE_COLS*MAZE_CELL)/2 + c*MAZE_CELL + MAZE_CELL/2,
+    z: -(MAZE_ROWS*MAZE_CELL)/2 + r*MAZE_CELL + MAZE_CELL/2
+  };
+}
+// Labyrinth per Tiefensuche (Recursive Backtracker) erzeugen — garantiert begehbaren Weg
+function generateMaze() {
+  const grid = [];
+  for (let r=0;r<MAZE_ROWS;r++){
+    grid[r]=[];
+    for (let c=0;c<MAZE_COLS;c++) grid[r][c]={ N:true,E:true,S:true,W:true, visited:false };
+  }
+  const stack = [[0,0]];
+  grid[0][0].visited = true;
+  while (stack.length) {
+    const [r,c] = stack[stack.length-1];
+    const nb = [];
+    if (r>0 && !grid[r-1][c].visited) nb.push(["N",r-1,c]);
+    if (r<MAZE_ROWS-1 && !grid[r+1][c].visited) nb.push(["S",r+1,c]);
+    if (c<MAZE_COLS-1 && !grid[r][c+1].visited) nb.push(["E",r,c+1]);
+    if (c>0 && !grid[r][c-1].visited) nb.push(["W",r,c-1]);
+    if (!nb.length) { stack.pop(); continue; }
+    const [dir,nr,nc] = nb[Math.floor(Math.random()*nb.length)];
+    // Wand zwischen aktueller Zelle und Nachbar entfernen
+    if (dir==="N"){ grid[r][c].N=false; grid[nr][nc].S=false; }
+    if (dir==="S"){ grid[r][c].S=false; grid[nr][nc].N=false; }
+    if (dir==="E"){ grid[r][c].E=false; grid[nr][nc].W=false; }
+    if (dir==="W"){ grid[r][c].W=false; grid[nr][nc].E=false; }
+    grid[nr][nc].visited = true;
+    stack.push([nr,nc]);
+  }
+  return grid;
+}
 function buildZombieHouse() {
   scene.background = new THREE.Color(0x020203);
-  scene.fog = new THREE.Fog(0x020204, 5, 30);
-  // Reihe von Räumen entlang -z, durch enge Türen verbunden. Start z=70, Ausgang am Ende.
-  const roomZ = [70, 38, 6, -26, -58];
-  const RW = 30, RD = 26, GAP = 5;
-  for (let ri=0; ri<roomZ.length; ri++) {
-    const rz = roomZ[ri];
-    // Boden (Holzdielen-Optik)
-    const f = new THREE.Mesh(new THREE.BoxGeometry(RW, 0.4, RD), mat(0x2a2018, { roughness: 1 }));
-    f.position.set(0, -0.2, rz); f.receiveShadow = true; scene.add(f);
-    // Decke
-    const ceil = new THREE.Mesh(new THREE.BoxGeometry(RW, 0.4, RD), mat(0x14100c, { roughness: 1 }));
-    ceil.position.set(0, 6, rz); scene.add(ceil);
-    // Seitenwände
-    buildWall(-RW/2, rz, 1.2, RD, 6); buildWall(RW/2, rz, 1.2, RD, 6);
-    // Vorder-/Rückwand mit Türöffnung (außer am Start hinten und Ausgang vorn)
-    const seg = (RW - GAP) / 2;
-    buildWall(-(GAP/2+seg/2), rz - RD/2, seg, 1.2, 6);
-    buildWall( (GAP/2+seg/2), rz - RD/2, seg, 1.2, 6);
-    buildWall(-(GAP/2+seg/2), rz + RD/2, seg, 1.2, 6);
-    buildWall( (GAP/2+seg/2), rz + RD/2, seg, 1.2, 6);
-    if (ri === 0) buildWall(0, rz + RD/2, GAP+0.2, 1.2, 6); // hinten verschlossen
-    // schwaches Mondlicht durch ein "Fenster" + vereinzelte trübe Lampen
-    const lamp = new THREE.PointLight(0x6688aa, 0.7, 20, 2);
-    lamp.position.set((ri%2?1:-1)*8, 4.5, rz); scene.add(lamp);
-    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), emat(0x88aacc, 0.6));
-    bulb.position.copy(lamp.position); scene.add(bulb);
-    // ein paar Möbel/Hindernisse als Schatten
-    for (let k=0;k<2;k++){
-      const crate = new THREE.Mesh(new THREE.BoxGeometry(2, 1.6, 2), mat(0x3a2c1c));
-      crate.position.set((Math.random()-0.5)*(RW-8), 0.8, rz + (Math.random()-0.5)*(RD-8));
-      crate.castShadow = true; scene.add(crate);
-    }
-    // Korridor zum nächsten Raum
-    if (ri < roomZ.length-1) {
-      const nz = roomZ[ri+1];
-      const midZ = (rz + nz)/2;
-      const cf = new THREE.Mesh(new THREE.BoxGeometry(GAP, 0.4, Math.abs(rz-nz)-RD), mat(0x2a2018));
-      cf.position.set(0, -0.2, midZ); cf.receiveShadow = true; scene.add(cf);
-      buildWall(-(GAP/2+0.6), midZ, 1.2, Math.abs(rz-nz)-RD, 6);
-      buildWall( (GAP/2+0.6), midZ, 1.2, Math.abs(rz-nz)-RD, 6);
+  scene.fog = new THREE.Fog(0x020204, 5, 26);
+  const W = MAZE_COLS*MAZE_CELL, D = MAZE_ROWS*MAZE_CELL;
+  const H = 6, half = MAZE_WALL/2;
+  // Boden + Decke
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(W+4, 0.4, D+4), mat(0x241c14, { roughness: 1 }));
+  floor.position.set(0, -0.2, 0); floor.receiveShadow = true; scene.add(floor);
+  const ceil = new THREE.Mesh(new THREE.BoxGeometry(W+4, 0.4, D+4), mat(0x100c08, { roughness: 1 }));
+  ceil.position.set(0, H, 0); scene.add(ceil);
+
+  mazeGrid = generateMaze();
+  const wallColor = 0x2a2230;
+  // Innenwände: pro Zelle nur N- und W-Wand bauen (geteilte Wände nicht doppelt)
+  for (let r=0;r<MAZE_ROWS;r++){
+    for (let c=0;c<MAZE_COLS;c++){
+      const p = mazeCellPos(r,c);
+      if (mazeGrid[r][c].N) buildWall(p.x, p.z - MAZE_CELL/2, MAZE_CELL+MAZE_WALL, MAZE_WALL, H, wallColor);
+      if (mazeGrid[r][c].W) buildWall(p.x - MAZE_CELL/2, p.z, MAZE_WALL, MAZE_CELL+MAZE_WALL, H, wallColor);
     }
   }
-  // Ausgang im letzten Raum: leuchtende grüne Tür
-  const exitZ = roomZ[roomZ.length-1] - RD/2;
-  const door = new THREE.Mesh(new THREE.BoxGeometry(GAP, 5, 0.6), emat(0x33ff77, 0.8));
-  door.position.set(0, 2.5, exitZ); scene.add(door);
-  const dl = new THREE.PointLight(0x33ff77, 2, 16, 2); dl.position.set(0, 3, exitZ); scene.add(dl);
-  const sign = makeMarker("➜", "#33ff77"); sign.position.set(0, 4.2, exitZ); sign.scale.set(2,2,1); scene.add(sign);
-  zombieExit = new THREE.Vector3(0, 0, exitZ);
+  // Außenmauern (Süd- und Ostrand)
+  for (let c=0;c<MAZE_COLS;c++){ const p=mazeCellPos(MAZE_ROWS-1,c); buildWall(p.x, p.z+MAZE_CELL/2, MAZE_CELL+MAZE_WALL, MAZE_WALL, H, wallColor); }
+  for (let r=0;r<MAZE_ROWS;r++){ const p=mazeCellPos(r,MAZE_COLS-1); buildWall(p.x+MAZE_CELL/2, p.z, MAZE_WALL, MAZE_CELL+MAZE_WALL, H, wallColor); }
+
+  // Vereinzelte schwache Lampen
+  for (let i=0;i<6;i++){
+    const r=Math.floor(Math.random()*MAZE_ROWS), c=Math.floor(Math.random()*MAZE_COLS);
+    const p=mazeCellPos(r,c);
+    const lamp = new THREE.PointLight(0x7088aa, 0.8, 16, 2); lamp.position.set(p.x, 4.6, p.z); scene.add(lamp);
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), emat(0x88aacc, 0.6));
+    bulb.position.set(p.x, 4.6, p.z); scene.add(bulb);
+  }
+  // Ein paar Kisten als Hindernisse (mit Kollision)
+  for (let i=0;i<5;i++){
+    const r=Math.floor(Math.random()*MAZE_ROWS), c=Math.floor(Math.random()*MAZE_COLS);
+    if (r===0&&c===0) continue;
+    const p=mazeCellPos(r,c);
+    const crate = new THREE.Mesh(new THREE.BoxGeometry(2, 1.6, 2), mat(0x3a2c1c));
+    crate.position.set(p.x, 0.8, p.z); crate.castShadow = true; scene.add(crate);
+    addCollider(p.x, p.z, 2, 2);
+  }
+
+  // Ausgang in der gegenüberliegenden Ecke: grüne Tür in der Südost-Außenwand
+  const ex = mazeCellPos(MAZE_ROWS-1, MAZE_COLS-1);
+  const door = new THREE.Mesh(new THREE.BoxGeometry(MAZE_CELL-1.5, 5, 0.6), emat(0x33ff77, 0.8));
+  door.position.set(ex.x, 2.5, ex.z + MAZE_CELL/2 + 0.4); scene.add(door);
+  const dl = new THREE.PointLight(0x33ff77, 2.2, 18, 2); dl.position.set(ex.x, 3, ex.z); scene.add(dl);
+  const sign = makeMarker("➜", "#33ff77"); sign.position.set(ex.x, 4.4, ex.z); sign.scale.set(2,2,1); scene.add(sign);
+  zombieExit = new THREE.Vector3(ex.x, 0, ex.z);
 }
 
 function populateZombies() {
   zombiesTotal = 0;
-  const roomZ = [70, 38, 6, -26, -58];
-  // Im Startraum nur wenige, danach immer mehr
-  const perRoom = [1, 3, 4, 5, 4];
-  roomZ.forEach((rz, ri) => {
-    for (let i=0;i<perRoom[ri];i++){
-      const x = (Math.random()-0.5)*22;
-      const z = rz + (Math.random()-0.5)*18;
-      const e = spawnEnemy("zombie", x, z);
-      // Zombie-Pose: beide Arme nach vorne, leicht gebeugt
-      e.obj.userData.lArmPivot.rotation.x = -1.4;
-      e.obj.userData.rArmPivot.rotation.x = -1.4;
-      zombiesTotal++;
-    }
-  });
-  // wenige, aber wertvolle Pickups
-  spawnPickup("heal", 8, 64);
-  spawnPickup("ki", -8, 0);
-  spawnPickup("heal", 8, -30);
-  spawnPickup("weapon", -8, -52, "masamune");
+  // Zombies in zufälligen Zellen verteilen — nicht in der Startecke, nicht direkt am Ausgang
+  const used = {};
+  let placed = 0, tries = 0;
+  while (placed < 14 && tries < 400) {
+    tries++;
+    const r = Math.floor(Math.random()*MAZE_ROWS), c = Math.floor(Math.random()*MAZE_COLS);
+    const key = r+","+c;
+    if (used[key]) continue;
+    if (r<=1 && c<=1) continue;                              // Startbereich freihalten
+    if (r===MAZE_ROWS-1 && c===MAZE_COLS-1) continue;        // Ausgangszelle freihalten
+    used[key] = true;
+    const p = mazeCellPos(r,c);
+    const e = spawnEnemy("zombie", p.x, p.z);
+    e.obj.userData.lArmPivot.rotation.x = -1.4;   // Schlurf-Pose
+    e.obj.userData.rArmPivot.rotation.x = -1.4;
+    // Patrouillenpunkte auf die eigene Zelle begrenzen, damit sie nicht durch Wände driften
+    e.wps = [ new THREE.Vector3(p.x, 0, p.z) ];
+    placed++; zombiesTotal++;
+  }
+  // wenige, aber wertvolle Pickups in verschiedenen Ecken
+  const a = mazeCellPos(MAZE_ROWS-1, 0), b = mazeCellPos(0, MAZE_COLS-1), m = mazeCellPos(Math.floor(MAZE_ROWS/2), Math.floor(MAZE_COLS/2));
+  spawnPickup("heal", a.x, a.z);
+  spawnPickup("ki", b.x, b.z);
+  spawnPickup("weapon", m.x, m.z, "masamune");
 }
 
 function updateZombieMode(dt) {
@@ -1267,6 +1334,7 @@ function updatePlayer(dt) {
   }
   playerObj.position.x = THREE.MathUtils.clamp(playerObj.position.x, -180, 180);
   playerObj.position.z = THREE.MathUtils.clamp(playerObj.position.z, -180, 100);
+  if (collisionEnabled) resolveCollisions(0.7);
 
   const ud = playerObj.userData;
   const sw = moving ? Math.sin(ps.walkPhase)*0.6 : 0;
@@ -1700,6 +1768,8 @@ function startGame() {
   initRenderer();
   initLights();
   bindInput();
+  colliders.length = 0;
+  collisionEnabled = (gameMode === "zombie");
   try {
     buildSky();
     createPlayer();
@@ -1724,10 +1794,11 @@ function startGame() {
       timeLeft = 180; paSpawnTimer = 0;
     } else if (gameMode === "zombie") {
       buildZombieHouse();
-      playerObj.position.set(0, 0, 78);
+      const start = mazeCellPos(0, 0);
+      playerObj.position.set(start.x, 0, start.z);
       noise = 0;
       populateZombies();
-      showMsg("Sei leise... erreiche den grünen Ausgang!", "#33ff77");
+      showMsg("Sei leise... finde den Weg durch das Labyrinth zum grünen Ausgang!", "#33ff77");
     }
   } catch (err) {
     showFatal((err && err.stack) ? err.stack : String(err));
