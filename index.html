@@ -125,6 +125,30 @@
 <script>
 "use strict";
 
+// On-screen error reporter so problems are visible instead of a black screen
+window.addEventListener("error", (ev)=>{
+  showFatal((ev.error && ev.error.stack) ? ev.error.stack : ev.message);
+});
+window.addEventListener("unhandledrejection", (ev)=>{
+  showFatal("Promise: " + (ev.reason && ev.reason.message ? ev.reason.message : ev.reason));
+});
+function showFatal(text){
+  let d = document.getElementById("fatalErr");
+  if (!d) {
+    d = document.createElement("div");
+    d.id = "fatalErr";
+    d.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:9999;max-height:40%;overflow:auto;"+
+      "background:rgba(40,0,0,0.92);color:#ffb3b3;font:12px monospace;padding:10px 14px;white-space:pre-wrap;border-top:1px solid #a33;";
+    document.body.appendChild(d);
+  }
+  d.textContent = "⚠ Fehler: " + text;
+}
+
+if (typeof THREE === "undefined") {
+  window.addEventListener("DOMContentLoaded", ()=> showFatal(
+    "Three.js konnte nicht geladen werden (CDN blockiert?). Prüfe deine Internet-/Netzwerk-Einstellungen."));
+}
+
 const CFG = {
   armorColor: 0x3b5b8c,
   clanColor: 0xe8c97a,
@@ -939,18 +963,22 @@ function animate() {
 
   for (const l of lanternLights) l.intensity = 1.4 + Math.sin(t*8 + l.position.x)*0.25;
 
-  if (gameStarted && !paused && !gameOver) {
-    updatePlayer(dt);
-    for (const e of enemies) updateEnemy(e, dt);
-    for (const a of allies) updateAlly(a, dt);
-    updateProjectiles(dt);
-    updatePetals(dt);
-    updateCamera(dt);
-    checkZone();
-    updateHud();
-    if (msgTimer > 0) { msgTimer -= dt; if (msgTimer <= 0) msgEl.style.opacity = 0; }
-  } else {
-    updatePetals(dt);
+  try {
+    if (gameStarted && !paused && !gameOver) {
+      updatePlayer(dt);
+      for (const e of enemies) updateEnemy(e, dt);
+      for (const a of allies) updateAlly(a, dt);
+      updateProjectiles(dt);
+      updatePetals(dt);
+      updateCamera(dt);
+      checkZone();
+      updateHud();
+      if (msgTimer > 0) { msgTimer -= dt; if (msgTimer <= 0) msgEl.style.opacity = 0; }
+    } else {
+      updatePetals(dt);
+    }
+  } catch (err) {
+    showFatal((err && err.stack) ? err.stack : String(err));
   }
 
   renderer.render(scene, camera);
@@ -1098,13 +1126,16 @@ function startGame() {
   // Init Three.js main scene only now
   initRenderer();
   initLights();
-  buildSky();
-  buildGround();
   bindInput();
-
-  createPlayer();
-  buildWorld();
-  populate();
+  try {
+    buildSky();
+    buildGround();
+    createPlayer();
+    buildWorld();
+    populate();
+  } catch (err) {
+    showFatal((err && err.stack) ? err.stack : String(err));
+  }
   gameStarted = true;
   clock.start();
   animate();
